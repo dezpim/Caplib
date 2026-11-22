@@ -59,6 +59,44 @@ namespace Caplib
             return SystemInformation.VirtualScreen;
         }
 
+        public static Bitmap CaptureBounds(Rectangle bounds)
+        {
+            if (bounds.Width <= 0 || bounds.Height <= 0)
+            {
+                return null;
+            }
+
+            Bitmap bmp = new Bitmap(bounds.Width, bounds.Height, PixelFormat.Format32bppArgb);
+            using (Graphics g = Graphics.FromImage(bmp))
+            {
+                g.CopyFromScreen(bounds.Location, Point.Empty, bounds.Size, CopyPixelOperation.SourceCopy);
+            }
+            return bmp;
+        }
+
+        public static void SaveBitmap(Bitmap bmp, SaveImageFormat format, string outputPath)
+        {
+            if (bmp == null)
+            {
+                return;
+            }
+
+            string dir = Path.GetDirectoryName(outputPath);
+            if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
+            {
+                Directory.CreateDirectory(dir);
+            }
+
+            if (format == SaveImageFormat.Jpeg)
+            {
+                SaveAsJpeg(bmp, outputPath, 90L);
+            }
+            else
+            {
+                bmp.Save(outputPath, ImageFormat.Png);
+            }
+        }
+
         public static void CaptureAndSave(
             Rectangle bounds,
             Point clickPoint,

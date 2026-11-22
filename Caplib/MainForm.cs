@@ -23,6 +23,15 @@ namespace Caplib
         public Rectangle Bounds { get; set; }
     }
 
+    internal sealed class AutoSaveJob
+    {
+        public Bitmap Bitmap { get; set; }
+        public string OutputPath { get; set; }
+        public SaveImageFormat Format { get; set; }
+        public int Sequence { get; set; }
+        public int TotalPages { get; set; }
+    }
+
     internal sealed class MainForm : Form
     {
         private const int HOTKEY_ID = 9001;
@@ -71,6 +80,15 @@ namespace Caplib
         private Label _lblLastFile;
         private Button _btnToggle;
         private Button _btnOpenFolder;
+
+        // UI Controls - Cloud Upload & Drag-Drop
+        private Panel _cloudPanel;
+        private CheckBox _chkAutoUpload;
+        private TextBox _txtCloudUrl;
+        private TextBox _txtCloudUser;
+        private TextBox _txtCloudPass;
+        private Label _lblDropZone;
+        private volatile bool _isUploading;
 
         public MainForm()
         {
@@ -122,9 +140,13 @@ namespace Caplib
             FormBorderStyle = FormBorderStyle.FixedSingle;
             MaximizeBox = false;
             StartPosition = FormStartPosition.CenterScreen;
-            ClientSize = new Size(480, 560);
+            ClientSize = new Size(480, 725);
             Font = new Font("Malgun Gothic", 9.5f, FontStyle.Regular);
             BackColor = Color.FromArgb(248, 250, 252);
+            AllowDrop = true;
+            DragEnter += OnFormDragEnter;
+            DragLeave += OnFormDragLeave;
+            DragDrop += OnFormDragDrop;
 
             // 1. Header (상태 & 카운트)
             _lblStatus = new Label();
@@ -338,6 +360,61 @@ namespace Caplib
             _btnOpenFolder.Size = new Size(156, 46);
             _btnOpenFolder.Click += OnOpenFolderClick;
             Controls.Add(_btnOpenFolder);
+
+            // 6. Cloud Upload Panel & Drag-Drop Zone
+            _cloudPanel = new Panel();
+            _cloudPanel.BackColor = Color.White;
+            _cloudPanel.BorderStyle = BorderStyle.FixedSingle;
+            _cloudPanel.Location = new Point(18, 522);
+            _cloudPanel.Size = new Size(444, 186);
+            Controls.Add(_cloudPanel);
+
+            _chkAutoUpload = new CheckBox();
+            _chkAutoUpload.Text = "압축 완료 시 클라우드 자동 업로드";
+            _chkAutoUpload.Font = new Font("Malgun Gothic", 9.5f, FontStyle.Bold);
+            _chkAutoUpload.ForeColor = Color.FromArgb(37, 99, 235);
+            _chkAutoUpload.Checked = true;
+            _chkAutoUpload.Location = new Point(12, 10);
+            _chkAutoUpload.Size = new Size(418, 22);
+            _cloudPanel.Controls.Add(_chkAutoUpload);
+
+            Label lblUrl = AddLabel(_cloudPanel, "서버 주소", 12, 40);
+            lblUrl.Size = new Size(68, 22);
+            _txtCloudUrl = new TextBox();
+            _txtCloudUrl.Text = "https://dsm6-server.ussuri-dace.ts.net";
+            _txtCloudUrl.Location = new Point(84, 37);
+            _txtCloudUrl.Size = new Size(344, 24);
+            _cloudPanel.Controls.Add(_txtCloudUrl);
+
+            Label lblUser = AddLabel(_cloudPanel, "아이디", 12, 70);
+            lblUser.Size = new Size(68, 22);
+            _txtCloudUser = new TextBox();
+            _txtCloudUser.Text = "admin";
+            _txtCloudUser.Location = new Point(84, 67);
+            _txtCloudUser.Size = new Size(125, 24);
+            _cloudPanel.Controls.Add(_txtCloudUser);
+
+            Label lblPass = AddLabel(_cloudPanel, "비밀번호", 220, 70);
+            lblPass.Size = new Size(62, 22);
+            _txtCloudPass = new TextBox();
+            _txtCloudPass.UseSystemPasswordChar = true;
+            _txtCloudPass.Location = new Point(286, 67);
+            _txtCloudPass.Size = new Size(142, 24);
+            _cloudPanel.Controls.Add(_txtCloudPass);
+
+            _lblDropZone = new Label();
+            _lblDropZone.Text = "여기에 다른 파일이나 폴더를 드래그 && 드롭하면 즉시 업로드됩니다";
+            _lblDropZone.TextAlign = ContentAlignment.MiddleCenter;
+            _lblDropZone.BackColor = Color.FromArgb(241, 245, 249);
+            _lblDropZone.ForeColor = Color.FromArgb(51, 65, 85);
+            _lblDropZone.BorderStyle = BorderStyle.FixedSingle;
+            _lblDropZone.Location = new Point(12, 104);
+            _lblDropZone.Size = new Size(416, 68);
+            _lblDropZone.AllowDrop = true;
+            _lblDropZone.DragEnter += OnFormDragEnter;
+            _lblDropZone.DragLeave += OnFormDragLeave;
+            _lblDropZone.DragDrop += OnFormDragDrop;
+            _cloudPanel.Controls.Add(_lblDropZone);
         }
 
         private static Label AddLabel(Control parent, string text, int x, int y)
@@ -523,7 +600,47 @@ namespace Caplib
                 }
             }
 
-            // 2. 반복 넘김 & 캡처
+            // 2. 비동기 백그라운드 이미지 저장 워커 초기화
+            BlockingCollection<AutoSaveJob> saveQueue = new BlockingCollection<AutoSaveJob>();
+            Thread saveWorker = new Thread(() =>
+            {
+                foreach (AutoSaveJob job in saveQueue.GetConsumingEnumerable())
+                {
+                    try
+                    {
+                        using (job.Bitmap)
+                        {
+                            ScreenCapturer.SaveBitmap(job.Bitmap, job.Format, job.OutputPath);
+                        }
+
+                        string fileName = Path.GetFileName(job.OutputPath);
+                        BeginInvoke((Action)(() =>
+                        {
+                            if (!IsDisposed)
+                            {
+                                int percent = (job.Sequence * 100) / job.TotalPages;
+                                _lblCount.Text = string.Format("진행: {0} / {1} 페이지 ({2}%)", job.Sequence, job.TotalPages, percent);
+                                _lblLastFile.Text = string.Format("최근 저장: {0}", fileName);
+                            }
+                        }));
+                    }
+                    catch (Exception ex)
+                    {
+                        string errMsg = ex.Message;
+                        BeginInvoke((Action)(() =>
+                        {
+                            if (!IsDisposed)
+                            {
+                                _lblLastFile.Text = string.Format("저장 실패: {0}", errMsg);
+                            }
+                        }));
+                    }
+                }
+            });
+            saveWorker.IsBackground = true;
+            saveWorker.Start();
+
+            // 3. 반복 캡처 & 넘김 (1페이지는 현재 화면 즉시 캡처, 2페이지부터 넘김 & 로딩 감지)
             string ext = format == SaveImageFormat.Jpeg ? "jpg" : "png";
             int count = 0;
 
@@ -535,64 +652,83 @@ namespace Caplib
                 }
 
                 int curPage = page;
-                BeginInvoke((Action)(() =>
+
+                // 2페이지부터는 이전 페이지 캡처 후 다음 페이지로 넘김 & 로딩 대기
+                if (page > 1)
                 {
-                    if (!IsDisposed)
+                    BeginInvoke((Action)(() =>
                     {
-                        _lblStatus.Text = string.Format("● 다음 페이지 넘김 중... ({0}/{1})", curPage, totalPages);
-                        _lblStatus.ForeColor = Color.FromArgb(220, 38, 38);
-                    }
-                }));
-
-                // (1) 우측 화살표 키 전송
-                NativeMethods.SendRightArrow();
-
-                // 대상 캡처 영역 계산
-                Rectangle bounds = ScreenCapturer.GetTargetBounds(scope);
-
-                // (2) 시간 대기 + 스마트 로딩 감지 동시 수행
-                WaitWithSmartLoading(
-                    bounds,
-                    baseDelayMs,
-                    enableSmartLoading,
-                    smartTimeoutMs,
-                    statusText =>
-                    {
-                        BeginInvoke((Action)(() =>
+                        if (!IsDisposed)
                         {
-                            if (!IsDisposed && _isAutoRunning)
-                            {
-                                _lblStatus.Text = string.Format("● {0} ({1}/{2})", statusText, curPage, totalPages);
-                                _lblStatus.ForeColor = Color.FromArgb(234, 88, 12);
-                            }
-                        }));
-                    });
+                            _lblStatus.Text = string.Format("● 다음 페이지 넘김 중... ({0}/{1})", curPage, totalPages);
+                            _lblStatus.ForeColor = Color.FromArgb(220, 38, 38);
+                        }
+                    }));
 
-                if (_cancelRequested)
+                    // (1) 우측 화살표 키 전송
+                    NativeMethods.SendRightArrow();
+
+                    // 대상 캡처 영역 계산 및 스마트 로딩 대기
+                    Rectangle waitBounds = ScreenCapturer.GetTargetBounds(scope);
+                    WaitWithSmartLoading(
+                        waitBounds,
+                        baseDelayMs,
+                        enableSmartLoading,
+                        smartTimeoutMs,
+                        statusText =>
+                        {
+                            BeginInvoke((Action)(() =>
+                            {
+                                if (!IsDisposed && _isAutoRunning)
+                                {
+                                    _lblStatus.Text = string.Format("● {0} ({1}/{2})", statusText, curPage, totalPages);
+                                    _lblStatus.ForeColor = Color.FromArgb(234, 88, 12);
+                                }
+                            }));
+                        });
+
+                    if (_cancelRequested)
+                    {
+                        break;
+                    }
+                }
+                else
                 {
-                    break;
+                    // 1페이지(시작 페이지): 카운트다운 동안 뷰어에 맞춰둔 현재 화면을 즉시 캡처
+                    BeginInvoke((Action)(() =>
+                    {
+                        if (!IsDisposed)
+                        {
+                            _lblStatus.Text = string.Format("● 현재 페이지 캡처 중... (1/{0})", totalPages);
+                            _lblStatus.ForeColor = Color.FromArgb(37, 99, 235);
+                        }
+                    }));
                 }
 
-                // (3) 로딩 완료 확정 후 화면 캡처
-                bounds = ScreenCapturer.GetTargetBounds(scope);
-                string fileName = string.Format("{0:D4}.{1}", curPage, ext);
-                string filePath = Path.Combine(_currentSessionDir, fileName);
-
-                ScreenCapturer.CaptureAndSave(bounds, Point.Empty, false, format, filePath);
-                count++;
-                _captureCount = count;
-
-                // (4) UI 갱신
-                BeginInvoke((Action)(() =>
+                // (2) 화면 캡처: 초고속 메모리 복사(5~10ms) 후 백그라운드 큐로 전달 (I/O 병렬화)
+                Rectangle bounds = ScreenCapturer.GetTargetBounds(scope);
+                Bitmap bmp = ScreenCapturer.CaptureBounds(bounds);
+                if (bmp != null)
                 {
-                    if (!IsDisposed)
+                    count++;
+                    _captureCount = count;
+                    string fileName = string.Format("{0:D4}.{1}", curPage, ext);
+                    string filePath = Path.Combine(_currentSessionDir, fileName);
+
+                    saveQueue.Add(new AutoSaveJob
                     {
-                        int percent = (curPage * 100) / totalPages;
-                        _lblCount.Text = string.Format("진행: {0} / {1} 페이지 ({2}%)", curPage, totalPages, percent);
-                        _lblLastFile.Text = string.Format("최근 저장: {0}", fileName);
-                    }
-                }));
+                        Bitmap = bmp,
+                        OutputPath = filePath,
+                        Format = format,
+                        Sequence = curPage,
+                        TotalPages = totalPages
+                    });
+                }
             }
+
+            // 모든 캡처 이미지의 디스크 저장 완료 대기
+            saveQueue.CompleteAdding();
+            saveWorker.Join(10000);
 
             FinishAutoSession(zipAndClean);
         }
@@ -655,7 +791,7 @@ namespace Caplib
                         if (diffRatio < 0.005)
                         {
                             stableCount++;
-                            // 연속 2회(약 200ms) 동안 화면이 안정화되면 로딩 완료 확정!
+                            // 연속 2회(약 80ms) 동안 화면이 안정화되면 로딩 완료 확정!
                             if (stableCount >= 2)
                             {
                                 break;
@@ -675,7 +811,7 @@ namespace Caplib
                     Buffer.BlockCopy(curBuf, 0, prevBuf, 0, curBuf.Length);
                     hasPrev = true;
 
-                    Thread.Sleep(100);
+                    Thread.Sleep(40);
                 }
             }
         }
@@ -975,7 +1111,7 @@ namespace Caplib
                 System.IO.Compression.ZipFile.CreateFromDirectory(
                     sessionDir,
                     zipPath,
-                    System.IO.Compression.CompressionLevel.Optimal,
+                    System.IO.Compression.CompressionLevel.Fastest,
                     false);
 
                 // 원본 이미지 폴더 및 파일 삭제
@@ -992,6 +1128,11 @@ namespace Caplib
                         _lblPath.Text = string.Format("저장 완료: {0}", zipPath);
                     }
                 }));
+
+                if (_chkAutoUpload.Checked)
+                {
+                    UploadPathsSync(new string[] { zipPath });
+                }
             }
             catch (Exception ex)
             {
@@ -1085,6 +1226,127 @@ namespace Caplib
 
             _clickHook.Dispose();
             base.OnFormClosing(e);
+        }
+
+        private void OnFormDragEnter(object sender, DragEventArgs e)
+        {
+            if (e.Data.GetDataPresent(DataFormats.FileDrop) && !_isUploading)
+            {
+                e.Effect = DragDropEffects.Copy;
+                _lblDropZone.BackColor = Color.FromArgb(219, 234, 254);
+                _lblDropZone.ForeColor = Color.FromArgb(30, 64, 175);
+            }
+            else
+            {
+                e.Effect = DragDropEffects.None;
+            }
+        }
+
+        private void OnFormDragLeave(object sender, EventArgs e)
+        {
+            _lblDropZone.BackColor = Color.FromArgb(241, 245, 249);
+            _lblDropZone.ForeColor = Color.FromArgb(51, 65, 85);
+        }
+
+        private void OnFormDragDrop(object sender, DragEventArgs e)
+        {
+            OnFormDragLeave(sender, EventArgs.Empty);
+
+            if (_isUploading || !e.Data.GetDataPresent(DataFormats.FileDrop))
+            {
+                return;
+            }
+
+            string[] paths = e.Data.GetData(DataFormats.FileDrop) as string[];
+            if (paths == null || paths.Length == 0)
+            {
+                return;
+            }
+
+            Thread uploadThread = new Thread(() => UploadPathsSync(paths));
+            uploadThread.IsBackground = true;
+            uploadThread.Start();
+        }
+
+        private void UploadPathsSync(string[] paths)
+        {
+            string url = string.Empty;
+            string user = string.Empty;
+            string pass = string.Empty;
+
+            Invoke((Action)(() =>
+            {
+                url = _txtCloudUrl.Text.Trim();
+                user = _txtCloudUser.Text.Trim();
+                pass = _txtCloudPass.Text;
+            }));
+
+            if (string.IsNullOrEmpty(url) || string.IsNullOrEmpty(user) || string.IsNullOrEmpty(pass))
+            {
+                BeginInvoke((Action)(() =>
+                {
+                    if (!IsDisposed)
+                    {
+                        _lblStatus.Text = "● 업로드 건너뜀";
+                        _lblStatus.ForeColor = Color.FromArgb(234, 88, 12);
+                        _lblLastFile.Text = "클라우드 주소/아이디/비밀번호를 입력하세요.";
+                    }
+                }));
+                return;
+            }
+
+            _isUploading = true;
+            try
+            {
+                for (int i = 0; i < paths.Length; i++)
+                {
+                    string targetPath = paths[i];
+                    string name = Path.GetFileName(targetPath);
+                    int idx = i + 1;
+                    int total = paths.Length;
+
+                    BeginInvoke((Action)(() =>
+                    {
+                        if (!IsDisposed)
+                        {
+                            _lblStatus.Text = string.Format("● 업로드 중 ({0}/{1})", idx, total);
+                            _lblStatus.ForeColor = Color.FromArgb(37, 99, 235);
+                            _lblDropZone.Text = string.Format("업로드 중: {0} ({1}/{2})", name, idx, total);
+                        }
+                    }));
+
+                    CloudUploader.UploadPath(url, user, pass, targetPath);
+                }
+
+                BeginInvoke((Action)(() =>
+                {
+                    if (!IsDisposed)
+                    {
+                        _lblStatus.Text = "● 업로드 완료";
+                        _lblStatus.ForeColor = Color.FromArgb(16, 185, 129);
+                        _lblLastFile.Text = string.Format("클라우드 업로드 완료: {0}개 항목", paths.Length);
+                        _lblDropZone.Text = "여기에 다른 파일이나 폴더를 드래그 && 드롭하면 즉시 업로드됩니다";
+                    }
+                }));
+            }
+            catch (Exception ex)
+            {
+                string errMsg = ex.Message;
+                BeginInvoke((Action)(() =>
+                {
+                    if (!IsDisposed)
+                    {
+                        _lblStatus.Text = "● 업로드 오류";
+                        _lblStatus.ForeColor = Color.FromArgb(239, 68, 68);
+                        _lblLastFile.Text = string.Format("업로드 실패: {0}", errMsg);
+                        _lblDropZone.Text = "업로드 실패 - 다시 드래그 && 드롭하여 재시도";
+                    }
+                }));
+            }
+            finally
+            {
+                _isUploading = false;
+            }
         }
     }
 }

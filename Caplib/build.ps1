@@ -20,6 +20,7 @@ $outExe = Join-Path $PSScriptRoot "Caplib.exe"
     (Join-Path $PSScriptRoot "NativeMethods.cs") `
     (Join-Path $PSScriptRoot "ClickHook.cs") `
     (Join-Path $PSScriptRoot "ScreenCapturer.cs") `
+    (Join-Path $PSScriptRoot "CloudUploader.cs") `
     (Join-Path $PSScriptRoot "MainForm.cs") `
     (Join-Path $PSScriptRoot "Program.cs")
 
